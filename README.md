@@ -11,7 +11,7 @@ Does a search for `neo4j` in GitHub and imports all repositories.  For each repo
 
 Because it uses the `neo4apis-github` gem, associated users are imported for repositories, issues, and comments.  Also, a second pass is made to make a query for every user to get all data for each user.
 
-`ActiveSupport::Cache::FileStoref` is used to store a cache of all requests in a directory so that if the script fails it can pick up where it left off.
+`ActiveSupport::Cache::FileStore` is used to store a cache of all requests in a directory so that if the script fails it can pick up where it left off.
 
 ## How to run
 
