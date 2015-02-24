@@ -4,9 +4,9 @@ require 'neo4apis/github'
 require 'active_support'
 require 'neo4j'
 
-NEO4J = Neo4j::Session.open(:server_db, 'http://localhost:7777')
+NEO4J = Neo4j::Session.open(:server_db, ENV['NEO4J_URL'])
 
-neo4apis_github = Neo4Apis::Github.new(Neo4j::Session.open(:server_db, 'http://localhost:7777/'))
+neo4apis_github = Neo4Apis::Github.new(NEO4J, relationship_transform: :upcase)
 
 
 require 'github_api/request'
@@ -31,15 +31,19 @@ module Github
           builder.use Github::Response::Jsonize
         end
         builder.use Github::Response::RaiseError
+
+        # LINES INSERTED BY ME
         store = ActiveSupport::Cache::FileStore.new 'cache', expires_in: (3600 * 24 * 365)
         builder.use FaradayMiddleware::Caching, store, ignore_params: %w[access_token]
+        # END LINES INSERTED BY ME
+
         builder.adapter options[:adapter]
       end
     end
   end # Middleware
 end # Github
 
-ActiveSupport::Cache::Store.logger = Logger.new(STDOUT)
+#ActiveSupport::Cache::Store.logger = Logger.new(STDOUT)
 
 
 github_client = Github.new(oauth_token: ENV['GITHUB_TOKEN'])#, adapter: :excon)
@@ -53,16 +57,46 @@ def import_repository(neo4apis_github, github_client, repository)
     puts 'Importing forks...'
 
     user, repo = user_and_repo(repository.html_url)
+
+    import_languages!(neo4apis_github, github_client, user, repo, repo_node)
+
     github_client.repositories.forks.list(user: user, repo: repo).each_page do |fork_repositories|
       fork_repositories.each do |fork_repository|
         fork_repository_node = import_repository(neo4apis_github, github_client, fork_repository)
 
-        neo4apis_github.add_relationship(:forked_from, fork_repository_node, repo_node)
+        neo4apis_github.add_relationship(:FORKED_FROM, fork_repository_node, repo_node) if fork_repository_node
       end
     end
   end
 rescue Github::Error::NotFound
   nil
+end
+
+def import_contributors!(neo4apis_github, github_client, user, repo, repo_node)
+  github_client.repos.contributors(user: user, repo: repo).each_page do |contributors|
+    next if contributors.size.zero?
+
+    contributors.each do |contributor|
+      contributor_node = neo4apis_github.import :User, contributor
+
+      neo4apis_github.add_relationship(:CONTRIBUTED_TO, contributor_node, repo_node)
+    end
+  end
+rescue Github::Error::NotFound
+  nil
+end
+
+Neo4Apis::Github.uuid :Language, :name
+Neo4Apis::Github.importer :Language do |language|
+  add_node :Language, OpenStruct.new(name: language), [:name]
+end
+  
+def import_languages!(neo4apis_github, github_client, user, repo, repo_node)
+  github_client.repositories.languages(user: user, repo: repo).each do |language, byte_count|
+    language_node = neo4apis_github.import :Language, language
+
+    neo4apis_github.add_relationship(:USES_LANGUAGE, repo_node, language_node, byte_count: byte_count)
+  end
 end
 
 def import_issues!(neo4apis_github, github_client, user, repo, repo_node, issue_nodes_by_number)
@@ -73,7 +107,7 @@ def import_issues!(neo4apis_github, github_client, user, repo, repo_node, issue_
 
       issue_nodes_by_number[issue.number.to_i] = issue_node
 
-      neo4apis_github.add_relationship(:has_issue, repo_node, issue_node)
+      neo4apis_github.add_relationship(:HAS_ISSUE, repo_node, issue_node)
     end
   end
 rescue Github::Error::NotFound
@@ -88,7 +122,7 @@ def import_issue_comments(neo4apis_github, github_client, user, repo, issue_node
 
       issue_number = comment.issue_url.match(/\/(\d+)\/?/)[1].to_i
       issue_node = issue_nodes_by_number[issue_number]
-      neo4apis_github.add_relationship(:comments_on, comment_node, issue_node) if comment_node && issue_node
+      neo4apis_github.add_relationship(:COMMENTS_ON, comment_node, issue_node) if comment_node && issue_node
     end
   end
 rescue Github::Error::NotFound
@@ -107,9 +141,9 @@ def import_repository_comments(neo4apis_github, github_client, user, repo, repo_
 
           commit_node = neo4apis_github.import :Commit, commit
 
-          neo4apis_github.add_relationship(:comments_on, comment_node, commit_node)
+          neo4apis_github.add_relationship(:COMMENTS_ON, comment_node, commit_node)
 
-          neo4apis_github.add_relationship(:in_repository, commit_node, repo_node)
+          neo4apis_github.add_relationship(:IN_REPOSITORY, commit_node, repo_node)
         rescue Github::Error::NotFound
           puts "Didn't find commit #{comment.commit_id}"
         end
@@ -143,6 +177,7 @@ neo4apis_github.batch do
 
       user, repo = user_and_repo(repository.html_url)
       issue_nodes_by_number = {}
+      import_contributors!(neo4apis_github, github_client, user, repo, repo_node)
       import_issues!(neo4apis_github, github_client, user, repo, repo_node, issue_nodes_by_number)
       import_issue_comments(neo4apis_github, github_client, user, repo, issue_nodes_by_number)
       import_repository_comments(neo4apis_github, github_client, user, repo, repo_node)
